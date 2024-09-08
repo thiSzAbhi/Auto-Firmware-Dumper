@@ -1,0 +1,201 @@
+name: Auto Firmware Dumper
+
+on:
+  workflow_dispatch:
+    inputs:
+      USER_NAME:
+        description: 'Name in GitHub Account'
+        required: true
+        default: ''
+      USER_EMAIL:
+        description: 'E-mail in GitHub Account'
+        required: true
+        default: ''
+      FIRMWARE_URL:
+        description: 'Stock ROM Link'
+        required: true
+        default: ''
+      GENERATE_VENDOR:
+        description: 'Create Vendor Tree'
+        required: true
+        default: 'false'
+        type: boolean
+      UPLOAD_LINEAGE_DT:
+        description: 'Upload LineageOS tree'
+        required: true
+        default: 'false'
+        type: boolean
+      UPLOAD_TWRP_DT:
+        description: 'Upload TWRP tree'
+        required: true
+        default: 'false'
+        type: boolean
+
+jobs:
+  dump:
+    name: Auto Firmware Dumper
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GTOKEN }}
+      TWT: ${{ github.event.inputs.UPLOAD_TWRP_DT }}
+      LOT: ${{ github.event.inputs.UPLOAD_LINEAGE_DT }}
+      GVT: ${{ github.event.inputs.GENERATE_VENDOR }}
+      FUR: ${{ github.event.inputs.FIRMWARE_URL }}
+      UN: ${{ github.event.inputs.USER_NAME }}
+      UEM: ${{ github.event.inputs.USER_EMAIL }}
+    permissions:
+      contents: write
+    steps:
+    - name: Check Out
+      uses: actions/checkout@v4
+
+    - name: Cleanup
+      uses: rokibhasansagar/slimhub_actions@main
+        
+    - name: Update Packages
+      run: |
+        sudo apt update \
+        && sudo apt -y upgrade \
+        && sudo apt -y install cpio aria2 git python3 neofetch tar gzip
+
+    - name: Setup GithubCLI
+      run: |
+        type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+        && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+        && sudo apt update \
+        && sudo apt install gh -y
+
+    - name: Clone and Setup DumprX
+      run: |
+        set -x
+        cd /home
+        sudo mkdir -p Auto-Dumper
+        cd Auto-Dumper
+        git clone https://github.com/DumprX/DumprX
+        cd DumprX
+        sudo chmod 777 *.sh
+        bash setup.sh
+        pip3 install aospdtgen
+        pip3 install twrpdtgen
+        echo "Clone and setup completed!"
+
+    - name: Creating Dump
+      run: |
+        set -x
+        cd /home/Auto-Dumper/DumprX
+        if [ -d "/home/Auto-Dumper/DumprX" ]; then
+          echo "Directory DumprX exists."
+        else
+          echo "Directory DumprX does not exist. Exiting..."
+          exit 1
+        fi
+        sudo bash dumper.sh "${{ env.FUR }}"
+        sudo chmod -R 777 out
+        echo "Dump creation completed!"
+
+    - name: Check Dump Output
+      run: |
+        if [ -d "/home/Auto-Dumper/DumprX/out" ]; then
+          echo "Output directory exists."
+        else
+          echo "Output directory does not exist. Exiting..."
+          exit 1
+        fi
+
+    - name: Setting up Git
+      run: |
+        git config --global user.name "${{ env.UN }}"
+        git config --global user.email "${{ env.UEM }}"
+        git config --global http.postBuffer 4718592000
+        unset GITHUB_TOKEN
+        gh auth login --with-token <<< "${{ secrets.GTOKEN }}"
+        echo "Git setup completed!"
+
+    - name: Uploading ROM Dump
+      run: |
+        set -x
+        cd /home/Auto-Dumper/DumprX/out
+        sudo chmod -R 777 *
+        if [ -d system ]; then
+           echo "System directory exists."
+        else
+           echo "System directory does not exist. Exiting..."
+           exit 1
+        fi
+        los_dir="lineage-device-tree"
+        if [ -d "$los_dir" ]; then
+           cp -r $los_dir /home/Auto-Dumper
+        else
+           echo "Lineage device tree not found!"
+        fi
+        tw_dir="twrp-device-tree"
+        if [ -d "$tw_dir" ]; then
+           cp -r $tw_dir /home/Auto-Dumper
+        else
+           echo "TWRP device tree not found!"
+        fi
+        if [ -d vendor ]; then
+           cd vendor
+        else
+           cd system
+           [ -d system ] && cd system
+        fi
+        codename=$(grep "ro.product.vendor.device=" build.prop | cut -d'=' -f2)
+        brand=$(grep "ro.product.vendor.brand=" build.prop | cut -d'=' -f2)
+        if [ "$codename" == "" ]; then
+           codename=$(grep "ro.vendor.product.device=" build.prop | cut -d'=' -f2)
+        fi
+        if [ "$brand" == "" ]; then
+           brand=$(grep "ro.vendor.product.brand=" build.prop | cut -d'=' -f2)
+        fi
+        echo "Codename: $codename, Brand: $brand"
+        cd /home/Auto-Dumper
+        echo "$codename" >> codename.txt
+        echo "$brand" >> brand.txt
+        echo "Uploading ROM dump completed!"
+
+    - name: Create vendor tree
+      if: env.GVT == 'true'
+      run: |
+        set -x
+        cd /home/Auto-Dumper
+        codename=$(cat codename.txt)
+        brand=$(cat brand.txt)
+        if [ -d "vnd_project/android/device/$brand/$codename" ]; then
+          echo "Device tree found."
+        else
+          echo "Device tree not found!"
+          exit 1
+        fi
+        cd vnd_project/android/device/"$brand"/"$codename"
+        bash extract-files.sh /home/Auto-Dumper/vnd_project/dump/
+        echo "Vendor tree creation completed!"
+
+    - name: Uploading Vendor Tree
+      if: env.GVT == 'true'
+      run: |
+        cd /home/Auto-Dumper/vnd_project/android/vendor/"$brand"/"$codename"
+        sudo chmod -R 777 *
+        git init
+        git branch -M vendor-"$codename"-$(date +%Y%m%d)
+        git add .
+        git commit -s -m "$codename : initial vendor tree"
+        gh repo create android_vendor_"$brand"_"$codename" --public --description="Vendor tree for $codename" --source=. --remote=origin --push
+        echo "Vendor tree uploaded successfully!"
+
+    - name: Uploading preview of images
+      uses: actions/upload-artifact@v4
+      with:
+        name: Prewiew images
+        path: |
+          /home/Auto-Dumper/boot.img
+          /home/Auto-Dumper/recovery.img
+          /home/Auto-Dumper/vendor_boot.img
+          /home/Auto-Dumper/init_boot.img
+          /home/Auto-Dumper/dtbo.img
+          /home/Auto-Dumper/dtb.img
+        if-no-files-found: ignore
+      continue-on-error: true
